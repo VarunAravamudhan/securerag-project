@@ -1,6 +1,7 @@
 .venv/
 __pycache__/
 *.pyc
+*.jsonl
 audit_log.jsonl
 chroma_data/
-.env
+.env
