@@ -97,11 +97,22 @@ async def api_query(request):
     }
 
     # Execute Stage 2 Retrieval & Reranking
-    result = pipeline.retrieve(query=query, user=user)
+    retrieval_result = pipeline.retrieve(query=query, user=user)
 
-    # Attach the latest audit event generated for this decision
-    last_event = get_last_audit_event()
-    result["audit_event"] = last_event
+    # Execute Stage 3 Safe LLM Generation & Security Inspection
+    from stage3_generation import process_stage2_to_stage3
+    stage3_output = process_stage2_to_stage3(retrieval_result, query=query, user_metadata=user)
+
+    # Attach Stage 3 answer, citations, and security report
+    result = {
+        **retrieval_result,
+        "generation": stage3_output.to_dict(),
+        "answer": stage3_output.answer,
+        "citations": [{"chunk_id": c.chunk_id, "source_doc": c.source_doc} for c in stage3_output.citations],
+        "stage3_status": stage3_output.status,
+        "security_report": stage3_output.security_report.to_dict(),
+        "audit_event": get_last_audit_event()
+    }
 
     return JSONResponse(result)
 

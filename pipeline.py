@@ -221,7 +221,7 @@ class SecureRAGPipeline:
             roles_list = list(roles)
 
         if allowed_classifications is None:
-            allowed_classifications = ["public", "internal"]
+            allowed_classifications = ["public", "internal", "confidential"]
 
         user = {
             "user_id": user_id,
@@ -229,7 +229,52 @@ class SecureRAGPipeline:
             "roles": roles_list,
             "allowed_classifications": allowed_classifications
         }
-        return self.retrieve(query=query, user=user, final_top_k=top_k)
+        return self.retrieve(query, user, final_top_k=top_k)
+
+    def generate_safe_answer(
+        self,
+        query: str,
+        user: Dict[str, Any],
+        top_k_candidates: int = 10,
+        final_top_k: int = 3,
+        api_key: Optional[str] = None,
+        provider: Optional[str] = None,
+        model: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Full 3-Stage SecureRAG Processing:
+        Stage 1: Provenance & Ingestion (Pre-indexed)
+        Stage 2: Authorization-Scoped Retrieval & Reranking
+        Stage 3: Safe LLM Generation & Output Security Inspection
+        """
+        stage2_result = self.retrieve(
+            query=query,
+            user=user,
+            top_k_candidates=top_k_candidates,
+            final_top_k=final_top_k
+        )
+
+        from stage3_generation import process_stage2_to_stage3
+
+        stage3_output = process_stage2_to_stage3(
+            stage2_output=stage2_result,
+            query=query,
+            user_metadata=user,
+            api_key=api_key,
+            provider=provider,
+            model=model
+        )
+
+        return {
+            "status": stage2_result.get("status", "success"),
+            "retrieval": stage2_result,
+            "chunks": stage2_result.get("chunks", []),
+            "generation": stage3_output.to_dict(),
+            "answer": stage3_output.answer,
+            "citations": [c.chunk_id for c in stage3_output.citations],
+            "stage3_status": stage3_output.status,
+            "security_report": stage3_output.security_report.to_dict()
+        }
 
     def get_quarantine_records(self) -> List[Dict[str, Any]]:
         """Returns all documents quarantined by Stage 1."""
