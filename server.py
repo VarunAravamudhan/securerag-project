@@ -96,12 +96,27 @@ async def api_query(request):
         "allowed_classifications": allowed_classes
     }
 
-    # Execute Stage 2 Retrieval & Reranking
-    retrieval_result = pipeline.retrieve(query=query, user=user)
+    chat_history = data.get("chat_history") or data.get("conversation_history") or []
 
-    # Execute Stage 3 Safe LLM Generation & Security Inspection
+    # Construct contextual retrieval query if follow-up question
+    retrieval_query = query
+    if chat_history:
+        user_queries = [m.get("content", "") for m in chat_history if isinstance(m, dict) and m.get("role") == "user" and m.get("content")]
+        if user_queries:
+            last_topic = user_queries[-1]
+            retrieval_query = f"{last_topic} {query}"
+
+    # Execute Stage 2 Retrieval & Reranking using contextual query
+    retrieval_result = pipeline.retrieve(query=retrieval_query, user=user)
+
+    # Execute Stage 3 Safe LLM Generation & Security Inspection using original query & history
     from stage3_generation import process_stage2_to_stage3
-    stage3_output = process_stage2_to_stage3(retrieval_result, query=query, user_metadata=user)
+    stage3_output = process_stage2_to_stage3(
+        retrieval_result, 
+        query=query, 
+        user_metadata=user,
+        conversation_history=chat_history
+    )
 
     # Attach Stage 3 answer, citations, and security report
     result = {
