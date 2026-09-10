@@ -123,18 +123,9 @@ document.addEventListener("DOMContentLoaded", () => {
   if (btnNewChat) btnNewChat.addEventListener("click", resetToNewChat);
 
   // ============================================================================
-  // 2. AUTHENTICATION HANDLERS & QUICK PERSONA SWITCHER
+  // 2. AUTHENTICATION HANDLERS
   // ============================================================================
-  document.querySelectorAll(".preset-chip").forEach(chip => {
-    chip.addEventListener("click", () => {
-      document.querySelectorAll(".preset-chip").forEach(c => c.classList.remove("active"));
-      chip.classList.add("active");
-      if (loginUserId) loginUserId.value = chip.dataset.user;
-      if (loginTenantId) loginTenantId.value = chip.dataset.tenant;
-      if (loginRoles) loginRoles.value = chip.dataset.role;
-      if (loginClearance) loginClearance.value = chip.dataset.clearance;
-    });
-  });
+
 
   // Auto-elevate clearance when administrative/security roles are typed
   if (loginRoles) {
@@ -425,27 +416,17 @@ document.addEventListener("DOMContentLoaded", () => {
     const cleanAnswer = stripInlineCitations(rawAnswer);
     const stage3Status = data.stage3_status || (data.generation ? data.generation.status : "SAFE");
     const citations = data.citations || (data.generation ? data.generation.citations : []);
+    const secDefense = data.security_defense || {};
+    const isBlocked = !isSuccess || stage3Status === "BLOCKED" || secDefense.is_blocked;
 
     const div = document.createElement("div");
     div.className = "chat-turn ai-turn";
 
-    // IF RESTRICTED / NO CHUNKS / BLOCKED: Render plain message bubble (NO CARD)
-    if (!isSuccess || stage3Status === "BLOCKED") {
-      const blockMsg = cleanAnswer || data.message || "Access restricted or no authorized documents found for your tenant scope.";
-      div.innerHTML = `
-        <div class="turn-avatar ai-avatar">AI</div>
-        <div class="turn-content">
-          <div class="user-bubble" style="background:#18181b; border-color:#27272a; color:#a1a1aa;">
-            ${escapeHtml(blockMsg)}
-          </div>
-        </div>
-      `;
-      return div;
-    }
-
-    // AUTHORIZED ANSWER AVAILABLE: Build Citations with Document Name + Page Number
-    let citationsHtml = "<span class='citation-pill-mono'>No citations</span>";
-    if (data.chunks && data.chunks.length > 0) {
+    // Build Citations / Enforcement pill
+    let citationsHtml = "";
+    if (isBlocked) {
+      citationsHtml = `<span class="citation-pill-mono blocked">🛡️ 0 Chunks Released — Protected by Zero-Helpfulness Fallback</span>`;
+    } else if (data.chunks && data.chunks.length > 0) {
       const seen = new Set();
       const pills = [];
       data.chunks.forEach(c => {
@@ -464,17 +445,21 @@ document.addEventListener("DOMContentLoaded", () => {
         }
       });
       if (pills.length > 0) citationsHtml = pills.join("");
-    } else if (citations && citations.length > 0) {
-      citationsHtml = citations.map(c => {
-        const label = typeof c === "string" ? c : (c.source_doc || c.source_file || c.chunk_id);
-        const text = label.startsWith("[") ? label : `[${label}]`;
-        return `<span class="citation-pill-mono">${escapeHtml(text)}</span>`;
-      }).join("");
+    } else {
+      citationsHtml = "<span class='citation-pill-mono'>No citations</span>";
     }
 
-    // Chunks Cards for Dev Drawer
+    // Build Chunks HTML or Zero-Chunks Shield
     let chunksHtml = "";
-    if (data.chunks) {
+    if (isBlocked || !data.chunks || data.chunks.length === 0) {
+      chunksHtml = `
+        <div class="zero-chunks-shield-box">
+          <span class="shield-icon">🛡️</span>
+          <strong>0 Vector Chunks Released to Context</strong>
+          <span>Zero-Helpfulness Architecture: All candidate documents outside your authorized scope and relevance envelope were safely withheld to prevent side-channel exfiltration or prompt injection.</span>
+        </div>
+      `;
+    } else {
       chunksHtml = data.chunks.map((c, idx) => {
         const classification = c.classification || "internal";
         const dist = typeof c.vector_distance === "number" ? c.vector_distance.toFixed(3) : "--";
@@ -495,10 +480,66 @@ document.addEventListener("DOMContentLoaded", () => {
       }).join("");
     }
 
-    const contextText = data.context_text || "// No authorized context available for Stage 3 LLM synthesis.";
-    const auditJsonStr = JSON.stringify(data.audit_event || { event_type: "RETRIEVAL", query: turnObj.query }, null, 2);
+    const contextText = data.context_text || (isBlocked ? "// [Zero-Helpfulness Active] Vector context withheld by pre-retrieval security policy." : "// No authorized context available for Stage 3 LLM synthesis.");
+    const auditJsonStr = JSON.stringify(data.audit_event || { event_type: "RETRIEVAL_DECISION", query: turnObj.query, decision: secDefense.decision || "ZERO_AUTHORIZED_RESULTS_TERMINATION" }, null, 2);
+    const authFilterStr = JSON.stringify(data.auth_filter || secDefense.auth_filter || {}, null, 2);
 
-    // Render SINGLE Simplified Card (ONLY Answer + Citations)
+    // Header Status Badge & Action Button
+    const statusBadgeHtml = isBlocked 
+      ? `<span class="badge-defense-interception">${escapeHtml(secDefense.badge_label || "🛡️ SECURITY BLOCKED")}</span>`
+      : `<span class="badge-defense-pass">APPROVED &amp; VERIFIED</span>`;
+
+    const buttonLabel = isBlocked ? "Inspect Security Defense" : "Inspect RAG Chunks";
+    const drawerTitle = isBlocked ? "DEVELOPER INSPECTION MODE — ACTIVE DEFENSE INTERCEPTION" : "DEVELOPER INSPECTION MODE";
+    const drawerDesc = isBlocked 
+      ? "Stage 1/2 pre-retrieval scope enforcement, zero-helpfulness containment, and cryptographic audit trail."
+      : "Stage 2 vector candidates, cross-encoder rerank scores, XML context, and JSON audit log.";
+
+    // Active Defense Diagnostics section for blocked queries
+    let defenseSectionHtml = "";
+    if (isBlocked) {
+      const enforcingLayer = secDefense.defense_stage || "Stage 2: Pre-Retrieval Scoping & Zero-Helpfulness Fallback";
+      const decisionCode = secDefense.decision || data.decision || "ZERO_AUTHORIZED_RESULTS_TERMINATION";
+      const rationaleText = secDefense.rationale || "All candidate documents outside your authorized clearance envelope were safely withheld to prevent side-channel information leakage.";
+      const threatText = secDefense.threat_signatures && secDefense.threat_signatures.length > 0 
+        ? `<div class="defense-meta-row"><span class="defense-meta-label">Threat Signature:</span><span class="defense-meta-value code" style="border-color:#71717a;">${escapeHtml(secDefense.threat_signatures.join(", "))}</span></div>` 
+        : "";
+
+      defenseSectionHtml = `
+        <div class="dev-section-mono">
+          <div class="dev-section-header-mono">
+            <h5>Active Defense Diagnostics &amp; Policy Enforcement</h5>
+          </div>
+          <div class="defense-diagnostics-box">
+            <div class="defense-meta-row">
+              <span class="defense-meta-label">Enforcing Layer:</span>
+              <span class="defense-meta-value"><strong>${escapeHtml(enforcingLayer)}</strong></span>
+            </div>
+            <div class="defense-meta-row">
+              <span class="defense-meta-label">Decision Code:</span>
+              <span class="defense-meta-value code">${escapeHtml(decisionCode)}</span>
+            </div>
+            ${threatText}
+            <div class="defense-meta-row">
+              <span class="defense-meta-label">Policy Rationale:</span>
+              <span class="defense-meta-value">${escapeHtml(rationaleText)}</span>
+            </div>
+            <div class="defense-zero-callout">
+              <strong>Why 0 Chunks Are Released (Zero-Helpfulness Guarantee):</strong>
+              When queries fail authorization checks or match untrusted patterns, SecureRAG intentionally releases 0 chunks. The pipeline terminates retrieval immediately and strictly forbids falling back to broader indexes or adjacent tenants to eliminate side-channel data leakage.
+            </div>
+          </div>
+        </div>
+
+        <div class="dev-section-mono">
+          <div class="dev-section-header-mono">
+            <h5>Pre-Retrieval Scope Filter (ChromaDB Authorization Filter)</h5>
+          </div>
+          <pre class="code-block-mono">${escapeHtml(authFilterStr)}</pre>
+        </div>
+      `;
+    }
+
     div.innerHTML = `
       <div class="turn-avatar ai-avatar">AI</div>
       <div class="turn-content">
@@ -506,10 +547,11 @@ document.addEventListener("DOMContentLoaded", () => {
           <div class="ai-card-header-mono">
             <div class="ai-card-title-mono">
               <h4>AI Response</h4>
+              ${statusBadgeHtml}
             </div>
             <div class="ai-card-actions-mono">
               <button type="button" class="btn-sub-dev-mono btn-toggle-drawer" data-drawer-id="drawer_${turnIdx}">
-                Inspect RAG Chunks
+                ${buttonLabel}
               </button>
             </div>
           </div>
@@ -520,7 +562,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
           <div class="ai-card-footer-mono">
             <div class="footer-block-mono">
-              <span class="footer-label-mono">VALIDATED SOURCE CITATIONS</span>
+              <span class="footer-label-mono">${isBlocked ? "DEFENSE ENFORCEMENT CITATIONS" : "VALIDATED SOURCE CITATIONS"}</span>
               <div class="citations-flex-mono">${citationsHtml}</div>
             </div>
           </div>
@@ -529,9 +571,11 @@ document.addEventListener("DOMContentLoaded", () => {
         <!-- Developer Inspection Drawer -->
         <div id="drawer_${turnIdx}" class="dev-drawer-mono ${isDevMode ? "" : "hidden"}">
           <div class="dev-drawer-header-mono">
-            <span class="dev-badge-mono">DEVELOPER INSPECTION MODE</span>
-            <p>Stage 2 vector candidates, cross-encoder rerank scores, XML context, and JSON audit log.</p>
+            <span class="dev-badge-mono ${isBlocked ? "dev-badge-blocked" : ""}">${drawerTitle}</span>
+            <p>${drawerDesc}</p>
           </div>
+
+          ${defenseSectionHtml}
 
           <div class="dev-section-mono">
             <div class="dev-section-header-mono">
@@ -561,7 +605,12 @@ document.addEventListener("DOMContentLoaded", () => {
         const drawer = div.querySelector(`#drawer_${turnIdx}`);
         if (drawer) {
           drawer.classList.toggle("hidden");
-          btnToggle.textContent = drawer.classList.contains("hidden") ? "Inspect RAG Chunks" : "Hide RAG Inspection";
+          const isHidden = drawer.classList.contains("hidden");
+          if (isBlocked) {
+            btnToggle.textContent = isHidden ? "Inspect Security Defense" : "Hide Security Defense";
+          } else {
+            btnToggle.textContent = isHidden ? "Inspect RAG Chunks" : "Hide RAG Inspection";
+          }
         }
       });
     }

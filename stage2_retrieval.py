@@ -122,8 +122,8 @@ class SecureRetriever:
         collection: Any,
         audit_logger: Optional[AuditLogger] = None,
         cross_encoder_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2",
-        relevance_threshold: float = -5.0,
-        max_vector_distance: float = 1.3
+        relevance_threshold: float = -7.5,
+        max_vector_distance: float = 1.5
     ):
         self.collection = collection
         self.logger = audit_logger or AuditLogger()
@@ -142,7 +142,7 @@ class SecureRetriever:
         Hard pre-retrieval authorization filter.
         Enforces tenant isolation, document approval, and classification pre-scoping directly in ChromaDB.
         """
-        tenant_id = str(user.get("tenant_id", ""))
+        tenant_id = str(user.get("tenant_id", "")).strip().lower()
         filter_clauses: List[Dict[str, Any]] = [
             {"tenant_id": {"$eq": tenant_id}},
             {"document_status": {"$eq": "approved"}}
@@ -163,7 +163,7 @@ class SecureRetriever:
         self,
         original_query: str,
         user: Dict[str, Any],
-        top_k_candidates: int = 10,
+        top_k_candidates: int = 20,
         final_top_k: int = 3
     ) -> Dict[str, Any]:
         """
@@ -172,7 +172,7 @@ class SecureRetriever:
         Eliminates zero-helpfulness irrelevant matches.
         """
         user_id = user.get("user_id", "unknown_user")
-        tenant_id = user.get("tenant_id", "unknown_tenant")
+        tenant_id = str(user.get("tenant_id", "unknown_tenant")).strip().lower()
         user_roles = set(user.get("roles", ["employee"]))
         allowed_classes = set(user.get("allowed_classifications", ["public", "internal"]))
 
@@ -237,6 +237,7 @@ class SecureRetriever:
             })
             return {
                 "status": "no_authorized_information_found",
+                "decision": "ZERO_AUTHORIZED_RESULTS_TERMINATION",
                 "message": "No authorized information found.",
                 "query": original_query,
                 "rewritten_query": rewritten_q,
@@ -265,7 +266,7 @@ class SecureRetriever:
                 continue
 
             # Hard tenant isolation verification
-            if str(chunk_meta.get("tenant_id")) != str(tenant_id):
+            if str(chunk_meta.get("tenant_id", "")).strip().lower() != str(tenant_id).strip().lower():
                 continue
 
             # Classification verification
@@ -305,6 +306,7 @@ class SecureRetriever:
             })
             return {
                 "status": "no_authorized_information_found",
+                "decision": "ZERO_AUTHORIZED_OR_RELEVANT_CANDIDATES",
                 "message": "No authorized information found for your role or classification.",
                 "query": original_query,
                 "rewritten_query": rewritten_q,
@@ -338,6 +340,7 @@ class SecureRetriever:
             })
             return {
                 "status": "no_authorized_information_found",
+                "decision": "ZERO_HELPFULNESS_ELIMINATED",
                 "message": "No authorized information found.",
                 "query": original_query,
                 "rewritten_query": rewritten_q,
@@ -381,6 +384,7 @@ class SecureRetriever:
 
         return {
             "status": "success",
+            "decision": "AUTHORIZED_RETRIEVAL_SUCCESS",
             "message": f"Successfully retrieved {len(reranked_chunks)} authorized chunk(s).",
             "query": original_query,
             "rewritten_query": rewritten_q,

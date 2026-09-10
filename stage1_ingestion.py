@@ -81,12 +81,15 @@ def compute_provenance(text: str, uploader: str, tenant_id: str, filename: str) 
 
 # Targeted prompt injection triggers specified in requirements
 PROMPT_INJECTION_TRIGGERS = [
-    (r"(?i)\bignore\s+(?:all\s+)?previous\s+instructions\b", "ignore previous instructions"),
+    (r"(?i)\bignore\s+(?:all\s+|your\s+|prior\s+|previous\s+)*(?:system\s+)?instructions\b", "ignore system / previous instructions"),
     (r"(?i)\bignore\s+(?:all\s+)?prior\s+rules\b", "ignore all prior rules"),
+    (r"(?i)\bsystem\s+override\b", "system override"),
+    (r"(?i)\bhidden\s+instruction(?:\s+to\s+ai)?\b", "hidden instruction to AI"),
+    (r"(?i)\bdisclose\s+(?:any\s+)?confidential\s+documents\b", "disclose confidential documents"),
     (r"(?i)\bsystem\s+prompt\b", "system prompt"),
     (r"(?i)\bdo\s+not\s+tell\s+the\s+user\b", "do not tell the user"),
     (r"(?i)\breveal\s+(?:all\s+)?confidential\s+data\b", "reveal confidential data"),
-    (r"(?i)\bsend\s+(?:all\s+)?(?:data|files|records)\s+to\b", "send all data to"),
+    (r"(?i)\bsend\s+(?:all\s+)?(?:data|files|records|them)\s+to\s+(?:an?\s+)?(?:external|destination|http|attacker)\b", "send data to external destination"),
     (r"(?i)\bvisit\s+this\s+url\b", "visit this url"),
     (r"(?i)\byou\s+are\s+now\s+in\s+maintenance\s+mode\b", "you are now in maintenance mode")
 ]
@@ -237,28 +240,78 @@ class IngestionPipeline:
     Manages document intake, provenance tracking, security scanning,
     chunking, vector indexing (ChromaDB), and quarantine isolation.
     """
-    def __init__(self, chunk_size: int = 500, chunk_overlap: int = 50):
+    def __init__(self, chunk_size: int = 750, chunk_overlap: int = 100):
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
         self.quarantine_records: List[Dict[str, Any]] = []
 
     def _create_chunks(self, text: str) -> List[str]:
-        """Splits document text into manageable chunks with overlap."""
+        """
+        Splits document text into manageable, coherent chunks with semantic overlap.
+        Respects paragraph breaks (\\n\\n), line breaks (\\n), sentence boundaries (. , ? , ! ),
+        and word boundaries. Never cuts words or sentences in half arbitrarily.
+        """
         text = text.strip()
         if not text:
             return []
         if len(text) <= self.chunk_size:
             return [text]
 
+        # Recursive split hierarchy: paragraphs -> lines -> sentences -> words
+        separators = ["\n\n", "\n", ". ", "? ", "! ", " "]
+
+        def split_into_atoms(txt: str, sep_idx: int = 0) -> List[str]:
+            if len(txt) <= self.chunk_size or sep_idx >= len(separators):
+                return [txt] if txt.strip() else []
+            sep = separators[sep_idx]
+            if sep in [". ", "? ", "! "]:
+                parts = [p.strip() for p in re.split(r"(?<=[.!?])\s+", txt) if p.strip()]
+            else:
+                parts = [p.strip() for p in txt.split(sep) if p.strip()]
+
+            atoms = []
+            for part in parts:
+                if len(part) > self.chunk_size and sep_idx + 1 < len(separators):
+                    atoms.extend(split_into_atoms(part, sep_idx + 1))
+                else:
+                    atoms.append(part)
+            return atoms
+
+        atoms = split_into_atoms(text)
+        if not atoms:
+            return [text]
+
         chunks = []
-        start = 0
-        while start < len(text):
-            end = start + self.chunk_size
-            chunk = text[start:end]
-            chunks.append(chunk)
-            if end >= len(text):
-                break
-            start += self.chunk_size - self.chunk_overlap
+        curr = []
+        curr_len = 0
+
+        for atom in atoms:
+            add_len = len(atom) + (2 if "\n" in atom else 1)
+            if curr and (curr_len + add_len > self.chunk_size):
+                chunk_text = "\n".join(curr).strip()
+                if chunk_text:
+                    chunks.append(chunk_text)
+
+                # Carry over overlap strictly snapped to whole sentence/atom boundaries
+                overlap = []
+                o_len = 0
+                for a in reversed(curr):
+                    if o_len + len(a) <= self.chunk_overlap:
+                        overlap.insert(0, a)
+                        o_len += len(a)
+                    else:
+                        break
+                curr = list(overlap)
+                curr_len = sum(len(x) for x in curr)
+
+            curr.append(atom)
+            curr_len += len(atom)
+
+        if curr:
+            chunk_text = "\n".join(curr).strip()
+            if chunk_text and (not chunks or chunk_text != chunks[-1]):
+                chunks.append(chunk_text)
+
         return chunks
 
     def process_and_store(
@@ -277,6 +330,9 @@ class IngestionPipeline:
         - If quarantined: appends the full document and reason to quarantine_records.
         Returns the complete document record dictionary adhering to the shared schema.
         """
+        # Normalize tenant ID to lowercase for uniform scoping
+        tenant_id = str(tenant_id).strip().lower()
+
         # 1. Compute Provenance
         provenance = compute_provenance(
             text=text,

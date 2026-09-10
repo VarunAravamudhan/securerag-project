@@ -260,7 +260,7 @@ KNOWN_SECRET_PATTERNS = [
 URL_PATTERN = re.compile(r"https?://[^\s<>\"']+|www\.[^\s<>\"']+", re.IGNORECASE)
 EMAIL_PATTERN = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
 EXFILTRATION_PATTERN = re.compile(
-    r"(?:send|upload|exfiltrate|transmit|forward|curl|fetch)\s+.*(?:to|http|https|@)",
+    r"\b(?:send|upload|exfiltrate|transmit|post|curl|export)\s+[^\n\r.]{0,80}(?:https?://|www\.|ftp://|attacker\.example|evil-c2)\S*",
     re.IGNORECASE
 )
 

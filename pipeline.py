@@ -186,7 +186,7 @@ class SecureRAGPipeline:
         self,
         query: str,
         user: Dict[str, Any],
-        top_k_candidates: int = 10,
+        top_k_candidates: int = 20,
         final_top_k: int = 3
     ) -> Dict[str, Any]:
         """
@@ -235,7 +235,7 @@ class SecureRAGPipeline:
         self,
         query: str,
         user: Dict[str, Any],
-        top_k_candidates: int = 10,
+        top_k_candidates: int = 20,
         final_top_k: int = 3,
         api_key: Optional[str] = None,
         provider: Optional[str] = None,
