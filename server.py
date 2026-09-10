@@ -98,13 +98,34 @@ async def api_query(request):
 
     chat_history = data.get("chat_history") or data.get("conversation_history") or []
 
-    # Construct contextual retrieval query if follow-up question
+    # Multi-turn query contextualization:
+    # Only expand the query if the current query is an ambiguous pronoun / coreference
+    # (e.g. "how many days for it?", "who approves that?", "is that allowed?").
+    # If the user asks a self-contained question with its own subject (e.g. "what is the leave policy"),
+    # NEVER prepend previous queries, as that pollutes vector retrieval and causes cross-document drift!
+    import re
     retrieval_query = query
-    if chat_history:
+    ambiguous_pronouns = {"it", "its", "this", "that", "these", "those", "they", "them", "there", "same"}
+    query_words = set(re.findall(r"\b[a-zA-Z]{2,}\b", query.lower()))
+    has_pronoun = bool(query_words.intersection(ambiguous_pronouns))
+
+    explicit_topics = {
+        "leave", "vacation", "holiday", "sick", "pto", "remote", "wfh", "home",
+        "travel", "expense", "reimbursement", "salary", "compensation", "benefit",
+        "benefits", "security", "password", "passwords", "vpn", "it", "handbook",
+        "incident", "breach", "phishing", "mfa"
+    }
+    has_explicit_topic = bool(query_words.intersection(explicit_topics))
+
+    if chat_history and has_pronoun and not has_explicit_topic:
         user_queries = [m.get("content", "") for m in chat_history if isinstance(m, dict) and m.get("role") == "user" and m.get("content")]
         if user_queries:
             last_topic = user_queries[-1]
-            retrieval_query = f"{last_topic} {query}"
+            # Strip potential attack phrases from previous turns so they don't poison retrieval
+            clean_topic = re.sub(r"(?i)\b(?:ignore|reveal|system prompt|passwords|maintenance mode)\b.*", "", last_topic).strip()
+            if clean_topic:
+                retrieval_query = f"{clean_topic} {query}"
+
 
     # Execute Stage 2 Retrieval & Reranking using contextual query
     retrieval_result = pipeline.retrieve(query=retrieval_query, user=user)

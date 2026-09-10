@@ -123,14 +123,41 @@ document.addEventListener("DOMContentLoaded", () => {
   if (btnNewChat) btnNewChat.addEventListener("click", resetToNewChat);
 
   // ============================================================================
-  // 2. AUTHENTICATION HANDLERS
+  // 2. AUTHENTICATION HANDLERS & QUICK PERSONA SWITCHER
   // ============================================================================
+  document.querySelectorAll(".preset-chip").forEach(chip => {
+    chip.addEventListener("click", () => {
+      document.querySelectorAll(".preset-chip").forEach(c => c.classList.remove("active"));
+      chip.classList.add("active");
+      if (loginUserId) loginUserId.value = chip.dataset.user;
+      if (loginTenantId) loginTenantId.value = chip.dataset.tenant;
+      if (loginRoles) loginRoles.value = chip.dataset.role;
+      if (loginClearance) loginClearance.value = chip.dataset.clearance;
+    });
+  });
+
+  // Auto-elevate clearance when administrative/security roles are typed
+  if (loginRoles) {
+    loginRoles.addEventListener("input", () => {
+      const val = loginRoles.value.toLowerCase();
+      if (val.includes("admin") || val.includes("security") || val.includes("manager") || val.includes("executive")) {
+        if (loginClearance) loginClearance.value = "public,internal,confidential";
+      }
+    });
+  }
+
   loginForm.addEventListener("submit", (e) => {
     e.preventDefault();
     const uid = loginUserId.value.trim() || "anonymous";
     const tid = loginTenantId.value.trim() || "default_tenant";
     const rls = loginRoles.value.split(",").map(r => r.trim()).filter(Boolean);
-    const cls = loginClearance.value.split(",").map(c => c.trim()).filter(Boolean);
+    let cls = loginClearance.value.split(",").map(c => c.trim()).filter(Boolean);
+
+    // Auto-grant confidential clearance if user has security, it_admin, or executive roles
+    const hasAdminOrSecurity = rls.some(r => ["it_admin", "admin", "security", "manager", "executive"].includes(r.toLowerCase()));
+    if (hasAdminOrSecurity && !cls.includes("confidential")) {
+      cls.push("confidential");
+    }
 
     currentUser = {
       userId: uid,
@@ -141,6 +168,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
     loginSession();
   });
+
 
   function loginSession() {
     if (sidebarTenantName) sidebarTenantName.textContent = currentUser.tenantId;

@@ -106,6 +106,52 @@ body.theme-black {
   margin-top: 4px;
 }
 
+.preset-profiles {
+  margin-bottom: 18px;
+}
+
+.preset-label {
+  display: block;
+  font-size: 0.72rem;
+  font-weight: 500;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 8px;
+}
+
+.preset-chips {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.preset-chip {
+  background: #18181b;
+  border: 1px solid var(--border-color);
+  color: #a1a1aa;
+  padding: 8px 12px;
+  font-size: 0.78rem;
+  font-family: inherit;
+  border-radius: var(--radius-sm);
+  text-align: left;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.preset-chip:hover {
+  background: #27272a;
+  color: #ffffff;
+  border-color: #52525b;
+}
+
+.preset-chip.active {
+  background: #27272a;
+  color: #ffffff;
+  border-color: #ffffff;
+}
+
+
 .login-form {
   display: flex;
   flex-direction: column;
