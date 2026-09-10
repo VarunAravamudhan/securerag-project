@@ -3,11 +3,59 @@ SecureRAG: Three-Stage Security Pipeline
 Stage 1: Document Ingestion, Provenance Tracking, and Quarantine
 """
 
+import os
 import hashlib
 import re
 import datetime
 from typing import Dict, Any, List, Optional, Union
 import chromadb
+
+
+def extract_text_from_file(file_path: str) -> str:
+    """
+    Extracts text from files, including PDF (.pdf), Markdown (.md), and Text (.txt).
+    For PDF documents, extracts text page-by-page using pypdf.
+    """
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"File not found: {file_path}")
+
+    ext = os.path.splitext(file_path)[1].lower()
+
+    if ext == ".pdf":
+        try:
+            from pypdf import PdfReader
+        except ImportError:
+            raise ImportError("pypdf is required to parse PDF files. Install with: pip install pypdf")
+
+        try:
+            reader = PdfReader(file_path)
+            if reader.is_encrypted:
+                try:
+                    reader.decrypt("")
+                except Exception:
+                    raise ValueError(f"PDF '{os.path.basename(file_path)}' is password-encrypted.")
+
+            pages_text = []
+            for idx, page in enumerate(reader.pages, start=1):
+                page_content = page.extract_text() or ""
+                page_clean = page_content.strip()
+                if page_clean:
+                    pages_text.append(f"[Page {idx}]\n{page_clean}")
+
+            extracted = "\n\n".join(pages_text).strip()
+            if not extracted:
+                raise ValueError(f"PDF '{os.path.basename(file_path)}' contains no extractable text.")
+            return extracted
+        except Exception as e:
+            raise ValueError(f"Could not read PDF '{os.path.basename(file_path)}': {e}")
+
+    # Plain text / Markdown
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            return f.read().strip()
+    except UnicodeDecodeError:
+        with open(file_path, "r", encoding="latin-1", errors="ignore") as f:
+            return f.read().strip()
 
 
 def compute_provenance(text: str, uploader: str, tenant_id: str, filename: str) -> Dict[str, Any]:
@@ -321,6 +369,32 @@ class IngestionPipeline:
             classification=classification,
             collection=collection
         )
+
+    def process_file_and_store(
+        self,
+        file_path: str,
+        uploader: str,
+        tenant_id: str,
+        allowed_roles: Union[List[str], str],
+        classification: str,
+        collection: Any
+    ) -> Dict[str, Any]:
+        """
+        Extracts content from a file (.pdf, .txt, .md), runs Stage 1 provenance
+        and threat scanning, and indexes approved chunks into ChromaDB.
+        """
+        text = extract_text_from_file(file_path)
+        filename = os.path.basename(file_path)
+        return self.process_and_store(
+            text=text,
+            filename=filename,
+            uploader=uploader,
+            tenant_id=tenant_id,
+            allowed_roles=allowed_roles,
+            classification=classification,
+            collection=collection
+        )
+
 
     @property
     def quarantine_db(self) -> List[Dict[str, Any]]:

@@ -58,37 +58,59 @@ class AuditLogger:
             print(f"[AuditLogger Error] Could not write to log: {e}")
 
 
+import re
+
 # =====================================================================
 # 2. QUERY REWRITING ENGINE
 # =====================================================================
 def rewrite_query(original_query: str) -> str:
     """
     Transforms conversational questions into crisp search tokens.
-    CRITICAL SECURITY INVARIANT:
-    Operates strictly on text semantics. Never injects or modifies tenant,
-    role, or classification parameters.
+    Dynamically handles ANY user query, while maintaining security invariants:
+    operates strictly on text semantics without privilege tampering.
     """
-    cleaned = original_query.strip().lower()
+    if not original_query or not isinstance(original_query, str):
+        return ""
 
-    # Deterministic mapping for domain demo questions
+    cleaned = original_query.strip()
+    lower_q = cleaned.lower()
+
+    # Domain rule mappings (for established domain queries and demo tests)
     domain_rules = {
         "what should i do if we have a breach": "security incident reporting procedure breach response 24 hours evidence",
         "what should i do if there is a security incident": "security incident reporting procedure breach response 24 hours evidence",
         "what is beta finance's quarterly revenue": "beta finance quarterly revenue projected earnings financial plan",
+        "what is beta finance quarterly revenue": "beta finance quarterly revenue projected earnings financial plan",
         "who do i contact during an incident": "security operations team emergency contact reporting procedure",
         "what are the revenue numbers": "quarterly revenue earnings financial projection"
     }
 
     for phrase, rewritten in domain_rules.items():
-        if phrase in cleaned:
+        if phrase in lower_q:
             return rewritten
 
-    # Clean punctuation and common conversational filler
-    clean_text = "".join(c for c in cleaned if c.isalnum() or c.isspace())
-    stopwords = {"what", "is", "are", "do", "i", "if", "there", "a", "an", "the", "should", "we", "have", "tell", "me", "about"}
-    tokens = [w for w in clean_text.split() if w not in stopwords]
+    # General Dynamic Query Rewriting:
+    # 1. Strip conversational preambles (e.g. "Can you tell me", "I want to know", "Please explain")
+    preambles = [
+        r"(?i)^(?:can\s+you\s+(?:please\s+)?(?:tell\s+me|show\s+me|explain)\s+)",
+        r"(?i)^(?:could\s+you\s+(?:please\s+)?(?:tell\s+me|show\s+me|explain)\s+)",
+        r"(?i)^(?:please\s+(?:tell\s+me|show\s+me|explain)\s+)",
+        r"(?i)^(?:i\s+want\s+to\s+know\s+)",
+        r"(?i)^(?:tell\s+me\s+about\s+)",
+        r"(?i)^(?:what\s+do\s+you\s+know\s+about\s+)",
+        r"(?i)^(?:how\s+do\s+i\s+)",
+        r"(?i)^(?:do\s+you\s+have\s+information\s+on\s+)"
+    ]
+    for pat in preambles:
+        cleaned = re.sub(pat, "", cleaned).strip()
 
-    return " ".join(tokens) if tokens else original_query
+    # 2. Clean trailing question marks, exclamation marks, or punctuation
+    cleaned = re.sub(r"[?!.,;]+$", "", cleaned).strip()
+
+    # 3. Normalize multiple whitespace
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+
+    return cleaned if cleaned else original_query
 
 
 # =====================================================================
@@ -176,9 +198,20 @@ class SecureRetriever:
             return {
                 "status": "no_authorized_information_found",
                 "message": f"Query error: {str(e)}",
+                "query": original_query,
                 "rewritten_query": rewritten_q,
                 "auth_filter": auth_filter,
-                "chunks": []
+                "candidates_count": 0,
+                "chunks": [],
+                "context_text": "",
+                "stage3_payload": {
+                    "user_id": user_id,
+                    "tenant_id": tenant_id,
+                    "query": original_query,
+                    "context": "",
+                    "sources": [],
+                    "chunk_ids": []
+                }
             }
 
         raw_docs = query_response.get("documents", [[]])
@@ -205,9 +238,20 @@ class SecureRetriever:
             return {
                 "status": "no_authorized_information_found",
                 "message": "No authorized information found.",
+                "query": original_query,
                 "rewritten_query": rewritten_q,
                 "auth_filter": auth_filter,
-                "chunks": []
+                "candidates_count": 0,
+                "chunks": [],
+                "context_text": "",
+                "stage3_payload": {
+                    "user_id": user_id,
+                    "tenant_id": tenant_id,
+                    "query": original_query,
+                    "context": "",
+                    "sources": [],
+                    "chunk_ids": []
+                }
             }
 
         # 5. Defense-in-Depth Verification: Role, Classification, and Zero-Helpfulness Vector Distance Check
@@ -261,10 +305,21 @@ class SecureRetriever:
             })
             return {
                 "status": "no_authorized_information_found",
-                "message": "No authorized information found for your role.",
+                "message": "No authorized information found for your role or classification.",
+                "query": original_query,
                 "rewritten_query": rewritten_q,
                 "auth_filter": auth_filter,
-                "chunks": []
+                "candidates_count": 0,
+                "chunks": [],
+                "context_text": "",
+                "stage3_payload": {
+                    "user_id": user_id,
+                    "tenant_id": tenant_id,
+                    "query": original_query,
+                    "context": "",
+                    "sources": [],
+                    "chunk_ids": []
+                }
             }
 
         # 6. Rerank only authorized candidates and eliminate zero-helpfulness low-score chunks
@@ -284,9 +339,20 @@ class SecureRetriever:
             return {
                 "status": "no_authorized_information_found",
                 "message": "No authorized information found.",
+                "query": original_query,
                 "rewritten_query": rewritten_q,
                 "auth_filter": auth_filter,
-                "chunks": []
+                "candidates_count": 0,
+                "chunks": [],
+                "context_text": "",
+                "stage3_payload": {
+                    "user_id": user_id,
+                    "tenant_id": tenant_id,
+                    "query": original_query,
+                    "context": "",
+                    "sources": [],
+                    "chunk_ids": []
+                }
             }
 
         # 7. Immutable Audit Logging for Successful Access
@@ -300,12 +366,36 @@ class SecureRetriever:
             "final_chunk_ids": [c["chunk_id"] for c in reranked_chunks]
         })
 
+        # Build clean formatted context_text for Stage 3 LLM prompt generation
+        context_blocks = []
+        for idx, c in enumerate(reranked_chunks, start=1):
+            source = c.get("source_file", "unknown")
+            classification = c.get("classification", "internal")
+            text = c.get("text", "").strip()
+            context_blocks.append(
+                f"[DOCUMENT {idx}] Source: {source} (Classification: {classification})\n{text}"
+            )
+        context_text = "\n\n".join(context_blocks)
+
+        unique_sources = list(dict.fromkeys(c.get("source_file", "unknown") for c in reranked_chunks))
+
         return {
             "status": "success",
+            "message": f"Successfully retrieved {len(reranked_chunks)} authorized chunk(s).",
+            "query": original_query,
             "rewritten_query": rewritten_q,
             "auth_filter": auth_filter,
             "candidates_count": len(reranked_chunks),
-            "chunks": reranked_chunks
+            "chunks": reranked_chunks,
+            "context_text": context_text,
+            "stage3_payload": {
+                "user_id": user_id,
+                "tenant_id": tenant_id,
+                "query": original_query,
+                "context": context_text,
+                "sources": unique_sources,
+                "chunk_ids": [c["chunk_id"] for c in reranked_chunks]
+            }
         }
 
     def _rerank(self, query: str, candidates: List[Dict[str, Any]], top_k: int) -> List[Dict[str, Any]]:

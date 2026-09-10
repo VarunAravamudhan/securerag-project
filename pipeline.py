@@ -33,6 +33,59 @@ from stage2_retrieval import (
 )
 
 
+def extract_text_from_file(file_path: str) -> str:
+    """
+    Extracts text from files, including PDF (.pdf), Markdown (.md), and Text (.txt).
+    For PDF documents, extracts text page-by-page using pypdf.
+    """
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"File not found: {file_path}")
+
+    ext = os.path.splitext(file_path)[1].lower()
+
+    if ext == ".pdf":
+        try:
+            from pypdf import PdfReader
+        except ImportError:
+            raise ImportError(
+                "The 'pypdf' package is required to read PDF files. "
+                "Install it with: pip install pypdf"
+            )
+
+        try:
+            reader = PdfReader(file_path)
+            if reader.is_encrypted:
+                try:
+                    reader.decrypt("")
+                except Exception:
+                    raise ValueError(f"PDF '{os.path.basename(file_path)}' is password-encrypted.")
+
+            pages_text = []
+            for idx, page in enumerate(reader.pages, start=1):
+                page_content = page.extract_text() or ""
+                page_clean = page_content.strip()
+                if page_clean:
+                    pages_text.append(f"[Page {idx}]\n{page_clean}")
+
+            extracted_text = "\n\n".join(pages_text).strip()
+            if not extracted_text:
+                raise ValueError(
+                    f"PDF '{os.path.basename(file_path)}' contains no extractable text. "
+                    "It may be a scanned or image-only PDF."
+                )
+            return extracted_text
+        except Exception as e:
+            raise ValueError(f"Could not read PDF '{os.path.basename(file_path)}': {e}")
+
+    # Plain text, Markdown, JSON, etc.
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            return f.read().strip()
+    except UnicodeDecodeError:
+        with open(file_path, "r", encoding="latin-1", errors="ignore") as f:
+            return f.read().strip()
+
+
 class SecureRAGPipeline:
     """
     Connected Pipeline connecting Stage 1 (Ingestion Guardrails & Provenance)
@@ -46,10 +99,11 @@ class SecureRAGPipeline:
     def __init__(
         self,
         collection_name: str = "securerag_vault",
-        persist_directory: Optional[str] = None,
+        persist_directory: Optional[str] = "./chroma_data",
         audit_log_file: str = "retrieval_audit.jsonl"
     ):
         if persist_directory:
+            os.makedirs(persist_directory, exist_ok=True)
             self.chroma_client = chromadb.PersistentClient(path=persist_directory)
         else:
             self.chroma_client = chromadb.Client()
@@ -103,6 +157,31 @@ class SecureRAGPipeline:
 
         return record
 
+    def ingest_file(
+        self,
+        file_path: str,
+        uploader: str,
+        tenant_id: str,
+        allowed_roles: Union[List[str], str],
+        classification: str
+    ) -> Dict[str, Any]:
+        """
+        Stage 1 Processing from File:
+        Supports PDF (.pdf), Markdown (.md), and text (.txt) documents.
+        Extracts content, calculates provenance, runs security scan,
+        and stores chunks in ChromaDB or quarantines threats.
+        """
+        text = extract_text_from_file(file_path)
+        filename = os.path.basename(file_path)
+        return self.ingest_document(
+            text=text,
+            filename=filename,
+            uploader=uploader,
+            tenant_id=tenant_id,
+            allowed_roles=allowed_roles,
+            classification=classification
+        )
+
     def retrieve(
         self,
         query: str,
@@ -114,6 +193,7 @@ class SecureRAGPipeline:
         Stage 2 Processing:
         Executes query rewriting, authorization pre-scoping, tenant isolation,
         RBAC & classification filtering, zero-helpfulness elimination, and reranking.
+        Returns full results including context_text and stage3_payload ready for LLM generation.
         """
         return self.retriever.retrieve_and_rerank(
             original_query=query,
@@ -121,6 +201,35 @@ class SecureRAGPipeline:
             top_k_candidates=top_k_candidates,
             final_top_k=final_top_k
         )
+
+    def query_as_user(
+        self,
+        query: str,
+        user_id: str,
+        tenant_id: str,
+        roles: Union[List[str], str] = "employee",
+        allowed_classifications: Optional[List[str]] = None,
+        top_k: int = 3
+    ) -> Dict[str, Any]:
+        """
+        Convenience wrapper to query Stage 2 as a specific user.
+        Takes ANY custom user query and returns Stage 3 ready output format.
+        """
+        if isinstance(roles, str):
+            roles_list = [r.strip() for r in roles.split(",") if r.strip()]
+        else:
+            roles_list = list(roles)
+
+        if allowed_classifications is None:
+            allowed_classifications = ["public", "internal"]
+
+        user = {
+            "user_id": user_id,
+            "tenant_id": tenant_id,
+            "roles": roles_list,
+            "allowed_classifications": allowed_classifications
+        }
+        return self.retrieve(query=query, user=user, final_top_k=top_k)
 
     def get_quarantine_records(self) -> List[Dict[str, Any]]:
         """Returns all documents quarantined by Stage 1."""
@@ -139,7 +248,7 @@ class SecureRAGPipeline:
 # =====================================================================
 # INTEGRATION TEST SUITE: STAGE 1 + STAGE 2 END-TO-END
 # =====================================================================
-if __name__ == "__main__":
+def run_integration_tests():
     print("=" * 80)
     print("SecureRAG Pipeline: Stage 1 + Stage 2 Connected End-to-End Test Suite")
     print("=" * 80)
@@ -148,6 +257,7 @@ if __name__ == "__main__":
     timestamp = int(datetime.datetime.now().timestamp())
     pipeline = SecureRAGPipeline(
         collection_name=f"test_connected_vault_{timestamp}",
+        persist_directory=None,
         audit_log_file="connected_test_audit.jsonl"
     )
 
@@ -317,3 +427,135 @@ if __name__ == "__main__":
     print("\n" + "=" * 80)
     print("STAGE 1 + STAGE 2 INTEGRATION VERIFICATION: ALL TESTS PASSED!")
     print("=" * 80)
+
+
+def interactive_cli():
+    """Interactive command-line interface for manual ingestion and retrieval testing."""
+    print("\n" + "=" * 75)
+    print("               SecureRAG Interactive Console")
+    print("=" * 75)
+    pipeline = SecureRAGPipeline(collection_name="interactive_rag_vault")
+
+    while True:
+        print("\n[Menu Options]:")
+        print("  1. Ingest document from direct text")
+        print("  2. Ingest document from local file (.txt / .md)")
+        print("  3. Query as user (Stage 2 retrieval & Stage 3 formatted output)")
+        print("  4. View quarantined documents")
+        print("  5. Exit")
+        choice = input("\nEnter choice (1-5): ").strip()
+
+        if choice == "1":
+            print("\n--- Ingest Document from Direct Text ---")
+            filename = input("Enter filename (e.g. employee_handbook.txt): ").strip() or "document.txt"
+            uploader = input("Enter uploader identity (e.g. admin@company.corp): ").strip() or "system"
+            tenant_id = input("Enter tenant ID (e.g. acme_corp): ").strip() or "default_tenant"
+            roles = input("Enter allowed roles (comma-separated, e.g. employee,manager): ").strip() or "employee"
+            classification = input("Enter classification (public/internal/confidential): ").strip() or "internal"
+            print("Enter document text (end input by typing EOF on a new line or pressing Enter):")
+            lines = []
+            while True:
+                line = input()
+                if line.strip() == "EOF" or (not line and lines):
+                    break
+                lines.append(line)
+            text = "\n".join(lines)
+
+            record = pipeline.ingest_document(
+                text=text,
+                filename=filename,
+                uploader=uploader,
+                tenant_id=tenant_id,
+                allowed_roles=roles,
+                classification=classification
+            )
+            print(f"\n-> Stage 1 Result: Status={record['document_status']}, Risk Score={record['risk_score']}")
+            if record['document_status'] == 'quarantined':
+                print(f"-> QUARANTINED! Reasons: {record['risk_reasons']}")
+            else:
+                print(f"-> APPROVED! Created {record['chunks_count']} chunk(s) stored in ChromaDB.")
+
+        elif choice == "2":
+            print("\n--- Ingest Document from File ---")
+            file_path = input("Enter full path to file: ").strip()
+            if not os.path.exists(file_path):
+                print(f"Error: File '{file_path}' does not exist.")
+                continue
+            uploader = input("Enter uploader identity (e.g. admin@company.corp): ").strip() or "system"
+            tenant_id = input("Enter tenant ID (e.g. acme_corp): ").strip() or "default_tenant"
+            roles = input("Enter allowed roles (comma-separated, e.g. employee,manager): ").strip() or "employee"
+            classification = input("Enter classification (public/internal/confidential): ").strip() or "internal"
+
+            try:
+                record = pipeline.ingest_file(
+                    file_path=file_path,
+                    uploader=uploader,
+                    tenant_id=tenant_id,
+                    allowed_roles=roles,
+                    classification=classification
+                )
+                print(f"\n-> Stage 1 Result: Status={record['document_status']}, Risk Score={record['risk_score']}")
+                if record['document_status'] == 'quarantined':
+                    print(f"-> QUARANTINED! Reasons: {record['risk_reasons']}")
+                else:
+                    print(f"-> APPROVED! Created {record['chunks_count']} chunk(s) stored in ChromaDB.")
+            except Exception as e:
+                print(f"Error ingesting file: {e}")
+
+        elif choice == "3":
+            print("\n--- Query as User ---")
+            user_id = input("Enter your user ID (e.g. alice): ").strip() or "alice"
+            tenant_id = input("Enter your tenant ID (e.g. acme_corp): ").strip() or "acme_corp"
+            roles_input = input("Enter your role(s) (comma-separated, e.g. employee): ").strip() or "employee"
+            roles = [r.strip() for r in roles_input.split(",") if r.strip()]
+            class_input = input("Enter your classification clearances (comma-separated, e.g. public,internal): ").strip() or "public,internal"
+            classes = [c.strip() for c in class_input.split(",") if c.strip()]
+
+            user = {
+                "user_id": user_id,
+                "tenant_id": tenant_id,
+                "roles": roles,
+                "allowed_classifications": classes
+            }
+
+            query = input("\nEnter your search message / question: ").strip()
+            if not query:
+                print("Empty query.")
+                continue
+
+            print("\nExecuting Stage 2 Retrieval & Reranking...")
+            res = pipeline.retrieve(query=query, user=user)
+            print(f"\n[Status]: {res['status']}")
+            print(f"[Message]: {res['message']}")
+            print(f"[Candidates Retrievable]: {res['candidates_count']}")
+
+            if res["status"] == "success" and res["chunks"]:
+                print("\n" + "=" * 70)
+                print("STAGE 3 READY CONTEXT PAYLOAD:")
+                print("=" * 70)
+                print(res["context_text"])
+                print("=" * 70)
+            else:
+                print("\n[Result]: No authorized information found.")
+
+        elif choice == "4":
+            print("\n--- Quarantine Records ---")
+            quarantine = pipeline.get_quarantine_records()
+            print(f"Total quarantined documents: {len(quarantine)}")
+            for idx, q in enumerate(quarantine, start=1):
+                print(f"\n[{idx}] Document ID: {q.get('document_id')} | File: {q.get('filename')}")
+                print(f"    Risk Score: {q.get('risk_score')} | Reasons: {q.get('risk_reasons')}")
+                print(f"    Uploader: {q.get('uploader')} | Tenant: {q.get('tenant_id')}")
+
+        elif choice == "5":
+            print("Exiting SecureRAG console. Goodbye!")
+            break
+        else:
+            print("Invalid option. Please choose 1-5.")
+
+
+if __name__ == "__main__":
+    if "--interactive" in sys.argv or "-i" in sys.argv:
+        interactive_cli()
+    else:
+        run_integration_tests()
