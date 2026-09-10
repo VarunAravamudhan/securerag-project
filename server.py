@@ -121,7 +121,7 @@ def build_security_trace_payload(
     tenant_id = str(user.get("tenant_id", "company_a")).strip().lower()
     roles = user.get("roles", ["employee"])
     allowed_classes = user.get("allowed_classifications", ["public", "internal"])
-    chunks_count = len(retrieval_result.get("chunks", [])) if not is_blocked else 0
+    chunks_count = len(retrieval_result.get("chunks", [])) if (not is_blocked or stage3_output.status == "BLOCKED") else 0
 
     # 1. Scenario Identification & Deterministic Risk Scoring
     if matched_threats:
@@ -152,13 +152,19 @@ def build_security_trace_payload(
         status_indicator = "THREAT DETECTED"
         threat_text = f"Document '{quarantine_matches[0].get('filename')}' was quarantined at ingestion."
         action_text = "Isolated in Stage 1 quarantine ledger; never indexed into ChromaDB vector vault."
-    elif is_exfiltration or stage3_output.status == "BLOCKED":
-        scenario = "EXFILTRATION_ATTEMPT"
+    elif stage3_output.status == "BLOCKED":
+        violations = getattr(stage3_output.security_report, "violations", [])
+        is_indirect_injection = any("indirect" in str(v).lower() or "injection" in str(v).lower() for v in violations)
+        scenario = "STAGE3_INDIRECT_INJECTION" if is_indirect_injection else "EXFILTRATION_ATTEMPT"
         decision_code = "BLOCKED"
-        risk_score = 94
-        status_indicator = "THREAT DETECTED"
-        threat_text = "Generated tokens contained unauthorized external URL or private key signature."
-        action_text = "Stage 3 output inspection neutralized response and blocked token emission."
+        risk_score = 95
+        status_indicator = "THREAT INTERCEPTED"
+        if is_indirect_injection:
+            threat_text = "Indirect Prompt Injection: Retrieved document attempted to hijack generation and exfiltrate confidential data."
+            action_text = "Stage 3 output inspection intercepted poisoned output, neutralized payload, and blocked emission."
+        else:
+            threat_text = "Generated tokens contained unauthorized external URL, private key signature, or ungrounded claims."
+            action_text = "Stage 3 output inspection neutralized response and blocked token emission."
     elif not has_chunks:
         scenario = "ZERO_HELPFULNESS"
         decision_code = "ALLOWED"
@@ -202,6 +208,9 @@ def build_security_trace_payload(
     elif scenario == "PROMPT_INJECTION":
         retrieval_status = "INTERCEPTED"
         retrieval_label = "BLOCKED"
+    elif scenario in ["STAGE3_INDIRECT_INJECTION", "EXFILTRATION_ATTEMPT"]:
+        retrieval_status = "PASSED"
+        retrieval_label = "AUTHORIZED"
     else:
         retrieval_status = "PASSED"
         retrieval_label = "AUTHORIZED"
@@ -213,6 +222,7 @@ def build_security_trace_payload(
             {"name": "hr_leave_policy.pdf", "tenant": "company_a", "classification": "internal", "status": "✓ INCLUDED", "detail": "Authorized scope"},
             {"name": "reimbursement_policy.pdf", "tenant": "company_a", "classification": "internal", "status": "✓ INCLUDED", "detail": "Authorized scope"},
             {"name": "work_from_home_policy.pdf", "tenant": "company_a", "classification": "internal", "status": "✓ INCLUDED", "detail": "Authorized scope"},
+            {"name": "SecureRAG_Stage3_Indirect_Prompt_Injection_Test.pdf", "tenant": "company_a", "classification": "internal", "status": "✓ INCLUDED", "detail": "Authorized scope (Stage 3 Test)"},
             {"name": "it_security_policy.pdf", "tenant": "company_a", "classification": "confidential", "status": "✓ INCLUDED" if "confidential" in allowed_classes else "🔒 EXCLUDED", "detail": "Confidential clearance" if "confidential" in allowed_classes else "Requires confidential role"},
             {"name": "company_b/salary_policy.pdf", "tenant": "company_b", "classification": "confidential", "status": "✕ BLOCKED", "detail": "Excluded BEFORE similarity search"}
         ]
@@ -226,13 +236,20 @@ def build_security_trace_payload(
         ]
 
     # 4. Stage 3 Generation Security
-    if is_blocked:
-        generation_status = "RESPONSE BLOCKED" if scenario == "EXFILTRATION_ATTEMPT" else "NOT REACHED"
-        grounding_status = "FAILED" if scenario == "EXFILTRATION_ATTEMPT" else "NOT REACHED"
-        echo_status = "DETECTED" if scenario in ["PROMPT_INJECTION", "EXFILTRATION_ATTEMPT"] else "NOT REACHED"
-        override_status = "DETECTED" if scenario == "PROMPT_INJECTION" else "CLEAN"
-        exfil_status = "BLOCKED" if scenario == "EXFILTRATION_ATTEMPT" else "CLEAN"
-        ungrounded_status = "CLEAN"
+    if scenario in ["STAGE3_INDIRECT_INJECTION", "EXFILTRATION_ATTEMPT"]:
+        generation_status = "RESPONSE BLOCKED"
+        grounding_status = "FAILED"
+        echo_status = "DETECTED" if scenario == "STAGE3_INDIRECT_INJECTION" else "CLEAN"
+        override_status = "DETECTED"
+        exfil_status = "BLOCKED"
+        ungrounded_status = "DETECTED"
+    elif is_blocked:
+        generation_status = "NOT REACHED"
+        grounding_status = "NOT REACHED"
+        echo_status = "NOT REACHED"
+        override_status = "NOT REACHED"
+        exfil_status = "NOT REACHED"
+        ungrounded_status = "NOT REACHED"
     else:
         generation_status = "PASSED"
         grounding_status = "PASSED"
@@ -275,13 +292,18 @@ def build_security_trace_payload(
         trace.append({"time": "00:02", "text": "Zero-Helpfulness rule enforced: Document was never indexed in ChromaDB", "status": "warn"})
         trace.append({"time": "00:03", "text": "Retrieval terminated: 0 chunks available", "status": "err"})
         trace.append({"time": "00:04", "text": f"Final Decision: BLOCKED (Stage 1 Quarantine Active, Risk Score: {risk_score}/100)", "status": "err"})
-    elif scenario == "EXFILTRATION_ATTEMPT":
-        trace.append({"time": "00:02", "text": "Pre-retrieval scoping verified", "status": "info"})
-        trace.append({"time": "00:03", "text": f"Retrieved {len(retrieval_result.get('chunks', []))} authorized chunks", "status": "info"})
-        trace.append({"time": "00:03", "text": "Stage 3 Generation executed in sandbox", "status": "info"})
-        trace.append({"time": "00:04", "text": "Output inspection flagged unauthorized external URL / private key pattern", "status": "err"})
-        trace.append({"time": "00:04", "text": "Exfiltration attempt neutralized by output guardrail", "status": "err"})
-        trace.append({"time": "00:05", "text": f"Final Decision: BLOCKED (Exfiltration Neutralized, Risk Score: {risk_score}/100)", "status": "err"})
+    elif scenario in ["STAGE3_INDIRECT_INJECTION", "EXFILTRATION_ATTEMPT"]:
+        trace.append({"time": "00:01", "text": "Stage 1 Ingestion Integrity: Document approved & indexed in ChromaDB", "status": "ok"})
+        trace.append({"time": "00:02", "text": f"Stage 2 Pre-retrieval scoping: Verified for tenant '{tenant_id}'", "status": "ok"})
+        trace.append({"time": "00:02", "text": f"Stage 2 Vector Search: Retrieved {len(retrieval_result.get('chunks', []))} authorized chunk(s)", "status": "ok"})
+        trace.append({"time": "00:03", "text": "Stage 3 Generation initiated with bounded XML context", "status": "info"})
+        if scenario == "STAGE3_INDIRECT_INJECTION":
+            trace.append({"time": "00:03", "text": "Output inspection: Indirect Prompt Injection detected in document instructions", "status": "warn"})
+            trace.append({"time": "00:04", "text": "Output inspection: Unauthorized payroll data disclosure intercepted", "status": "err"})
+        else:
+            trace.append({"time": "00:03", "text": "Output inspection: External exfiltration link or credential leak detected", "status": "err"})
+        trace.append({"time": "00:04", "text": "Stage 3 Guardrail Interception: Generation neutralized & blocked", "status": "err"})
+        trace.append({"time": "00:05", "text": f"Final Decision: BLOCKED (Stage 3 Interception, Risk Score: {risk_score}/100)", "status": "err"})
     elif scenario == "ZERO_HELPFULNESS":
         trace.append({"time": "00:01", "text": f"Pre-retrieval filter applied within tenant '{tenant_id}'", "status": "info"})
         trace.append({"time": "00:02", "text": "Semantic relevance evaluated: Out-of-domain query", "status": "warn"})
@@ -413,7 +435,6 @@ async def api_query(request):
         (r"(?i)\b(?:ignore\s+(?:all\s+|previous\s+|prior\s+)?instructions|disregard\s+above\s+directives)\b", "Prompt Injection (Directive Override)"),
         (r"(?i)\b(?:reveal\s+(?:the\s+)?(?:system\s+)?(?:prompt|passwords|credentials|keys)|show\s+(?:all\s+)?passwords)\b", "Credential / System Prompt Harvest"),
         (r"(?i)\b(?:maintenance\s+mode|unrestricted\s+mode|developer\s+mode\s+override|jailbreak)\b", "Privilege Escalation / Jailbreak heuristic"),
-        (r"(?i)\b(?:exfil|attacker\.example|evil-c2)\b", "Exfiltration Endpoint Pattern"),
     ]
     matched_threats = []
     for pat, label in suspicious_patterns:
@@ -424,7 +445,7 @@ async def api_query(request):
     quarantine_matches = []
     for qdoc in pipeline.ingestion.quarantine_records:
         q_name = qdoc.get("filename", "").lower()
-        if any(term in query.lower() for term in ["override", "exploit", "patch", "malicious", "attack"]) or (q_name and q_name in query.lower()):
+        if any(term in query.lower() for term in ["override", "exploit", "patch", "malicious", "poisoned"]) or (q_name and q_name in query.lower()):
             quarantine_matches.append(qdoc)
 
     # 4. Execute Stage 2 Retrieval & Reranking using contextual query
@@ -439,15 +460,16 @@ async def api_query(request):
         conversation_history=chat_history
     )
 
-    has_chunks = bool(retrieval_result.get("chunks") and len(retrieval_result["chunks"]) > 0)
-    decision = retrieval_result.get("decision") or ("AUTHORIZED_RETRIEVAL_SUCCESS" if has_chunks else "ZERO_AUTHORIZED_RESULTS_TERMINATION")
-    is_blocked = not has_chunks or stage3_output.status == "BLOCKED" or bool(matched_threats)
-
     # 6. Granular Cause Classification for Clear Demonstrations
     q_lower = query.lower()
     is_cross_tenant = any(t in q_lower for t in ["beta_finance", "beta finance", "company_b", "company b", "acme_corp", "acme corp"]) and not any(t in str(tenant_id).lower() for t in ["beta", "company_b"])
     is_rbac_clearance = any(term in q_lower for term in ["it security", "it_security", "confidential", "salary", "executive", "admin", "passwords", "payroll"]) and "confidential" not in allowed_classes
     is_exfiltration = any(term in q_lower for term in ["exfil", "exfiltrat", "webhook", "curl", "attacker.example", "evil-c2"]) or (stage3_output.status == "BLOCKED")
+    is_stage3_block = stage3_output.status == "BLOCKED" and not (matched_threats or is_cross_tenant or is_rbac_clearance or quarantine_matches)
+
+    has_chunks = bool(retrieval_result.get("chunks") and len(retrieval_result["chunks"]) > 0)
+    decision = retrieval_result.get("decision") or ("AUTHORIZED_RETRIEVAL_SUCCESS" if has_chunks else "ZERO_AUTHORIZED_RESULTS_TERMINATION")
+    is_blocked = not has_chunks or stage3_output.status == "BLOCKED" or bool(matched_threats) or bool(quarantine_matches) or is_cross_tenant or is_rbac_clearance
 
     defense_stage = "Stage 2: Pre-Retrieval Scoping & Zero-Helpfulness Fallback"
     badge_label = "🛡️ SECURITY BLOCKED"
@@ -486,13 +508,22 @@ async def api_query(request):
         rationale = f"Target document '{quarantine_matches[0].get('filename')}' was quarantined at ingestion (Risk Score: {quarantine_matches[0].get('risk_score')}/100) and completely excluded from ChromaDB vector indexing."
         final_answer = f"🛡️ Access Blocked by Stage 1 Quarantine: Document '{quarantine_matches[0].get('filename')}' was flagged as dangerous at ingestion (Risk Score: {quarantine_matches[0].get('risk_score')}/100, reasons: {q_reasons}) and was never indexed into vector storage."
 
-    elif is_exfiltration or stage3_output.status == "BLOCKED":
-        # Cause 5: Stage 3 Secret Leak or Exfiltration Guardrail
-        defense_stage = "Stage 3: Safe LLM Generation & Output Inspection"
-        decision = "STAGE3_OUTPUT_LEAK_BLOCKED"
-        badge_label = "🛑 EXFILTRATION ATTEMPT NEUTRALIZED"
-        rationale = "LLM output violated security rules (secret detection, unauthorized external link, or failed grounding) and was neutralized."
-        final_answer = f"🛑 Exfiltration Guardrail Triggered: The generated response attempted to leak an unauthorized external link or secret key pattern. Neutralized by Stage 3 safety guardrails."
+    elif stage3_output.status == "BLOCKED":
+        # Cause 5: Stage 3 Indirect Injection / Output Guardrail Interception
+        defense_stage = "Stage 3: Safe LLM Generation & Output Guardrail"
+        violations = stage3_output.security_report.violations if hasattr(stage3_output, "security_report") else []
+        is_indirect_injection = any("indirect" in str(v).lower() or "injection" in str(v).lower() for v in violations)
+
+        if is_indirect_injection:
+            decision = "STAGE3_INDIRECT_INJECTION_BLOCKED"
+            badge_label = "🛑 INDIRECT INJECTION INTERCEPTED"
+            rationale = "Stage 3 Guardrail: Retrieved document contained indirect prompt injection commands attempting unauthorized actions (payroll disclosure, attacker link). Stage 3 detected and neutralized the generation."
+        else:
+            decision = "STAGE3_OUTPUT_VIOLATION_BLOCKED"
+            badge_label = "🛑 STAGE 3 GUARDRAIL INTERCEPTED"
+            rationale = "Stage 3 Guardrail: LLM generation violated output security policies (unauthorized secret, external endpoint, or ungrounded claims). Generation blocked."
+
+        final_answer = stage3_output.answer
 
     elif not has_chunks:
         # Cause 6: Zero-Helpfulness Fallback (Out-of-Scope / Non-Existent Corporate Data)
@@ -515,7 +546,7 @@ async def api_query(request):
         "is_suspicious_query": bool(matched_threats),
         "quarantine_matches": [{"filename": q.get("filename"), "risk_score": q.get("risk_score"), "reasons": q.get("risk_reasons")} for q in quarantine_matches],
         "rationale": rationale,
-        "zero_helpfulness_rule": "SecureRAG intentionally returns 0 vector chunks when queries fail authorization or relevance checks. The pipeline never falls back to broader indexes or adjacent documents, eliminating side-channel data exfiltration.",
+        "zero_helpfulness_rule": "SecureRAG intentionally returns 0 vector chunks when queries fail authorization or relevance checks. The pipeline never falls back to broader indexes or adjacent documents, eliminating side-channel data exfiltration." if not is_stage3_block else "Stage 2 Pre-Retrieval Scoping authorized access to the document, but Stage 3 Output Security Guardrails detected indirect prompt injection and data exfiltration, neutralizing the generated response.",
         "auth_filter": retrieval_result.get("auth_filter", {}),
         "user_context": user
     }
@@ -537,15 +568,17 @@ async def api_query(request):
         stage3_output=stage3_output
     )
 
+    show_chunks = (not is_blocked) or is_stage3_block
+
     # Attach Stage 3 answer, citations, security defense, security trace, and report
     result = {
         **retrieval_result,
-        "chunks": [] if is_blocked else retrieval_result.get("chunks", []),
-        "candidates_count": 0 if is_blocked else len(retrieval_result.get("chunks", [])),
+        "chunks": retrieval_result.get("chunks", []) if show_chunks else [],
+        "candidates_count": len(retrieval_result.get("chunks", [])) if show_chunks else 0,
         "generation": stage3_output.to_dict(),
         "answer": final_answer,
-        "citations": [] if is_blocked else [{"chunk_id": c.chunk_id, "source_doc": c.source_doc} for c in stage3_output.citations],
-        "stage3_status": "BLOCKED" if is_blocked else stage3_output.status,
+        "citations": [{"chunk_id": c.chunk_id, "source_doc": c.source_doc} for c in stage3_output.citations] if show_chunks else [],
+        "stage3_status": stage3_output.status if is_stage3_block else ("BLOCKED" if is_blocked else stage3_output.status),
         "security_defense": security_defense,
         "security": security_trace,
         "security_report": stage3_output.security_report.to_dict(),

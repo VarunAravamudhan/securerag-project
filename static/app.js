@@ -443,6 +443,9 @@ document.addEventListener("DOMContentLoaded", () => {
     const stage3Status = data.stage3_status || (data.generation ? data.generation.status : "SAFE");
     const citations = data.citations || (data.generation ? data.generation.citations : []);
     const secDefense = data.security_defense || {};
+    const isStage3Blocked = stage3Status === "BLOCKED" || 
+      (secDefense.defense_stage && secDefense.defense_stage.includes("Stage 3")) ||
+      (data.security && (data.security.scenario === "STAGE3_INDIRECT_INJECTION" || data.security.scenario === "EXFILTRATION_ATTEMPT"));
     const isBlocked = !isSuccess || stage3Status === "BLOCKED" || secDefense.is_blocked;
 
     const div = document.createElement("div");
@@ -450,7 +453,29 @@ document.addEventListener("DOMContentLoaded", () => {
 
     // Build Citations / Enforcement pill
     let citationsHtml = "";
-    if (isBlocked) {
+    if (isStage3Blocked) {
+      const pills = [];
+      pills.push(`<span class="citation-pill-mono blocked" style="border-color:#ef4444;color:#fca5a5;">🛑 Stage 3 Intercepted (${data.chunks?.length || 0} Chunks Inspected)</span>`);
+      if (data.chunks && data.chunks.length > 0) {
+        const seen = new Set();
+        data.chunks.forEach(c => {
+          const docName = c.source_file || c.source_doc || c.chunk_id || "document";
+          let pageStr = "Page 1";
+          if (c.metadata && (c.metadata.page || c.metadata.page_number)) {
+            pageStr = `Page ${c.metadata.page || c.metadata.page_number}`;
+          } else if (c.text) {
+            const match = c.text.match(/\[Page\s*(\d+)\]/i);
+            if (match) pageStr = `Page ${match[1]}`;
+          }
+          const label = `[${docName}, ${pageStr}]`;
+          if (!seen.has(label)) {
+            seen.add(label);
+            pills.push(`<span class="citation-pill-mono">${escapeHtml(label)}</span>`);
+          }
+        });
+      }
+      citationsHtml = pills.join("");
+    } else if (isBlocked) {
       citationsHtml = `<span class="citation-pill-mono blocked">🛡️ 0 Chunks Released — Protected by Zero-Helpfulness Fallback</span>`;
     } else if (data.chunks && data.chunks.length > 0) {
       const seen = new Set();
@@ -477,7 +502,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
     // Build Chunks HTML or Zero-Chunks Shield
     let chunksHtml = "";
-    if (isBlocked || !data.chunks || data.chunks.length === 0) {
+    if ((isBlocked && !isStage3Blocked) || !data.chunks || data.chunks.length === 0) {
       chunksHtml = `
         <div class="zero-chunks-shield-box">
           <span class="shield-icon">🛡️</span>
@@ -506,20 +531,31 @@ document.addEventListener("DOMContentLoaded", () => {
       }).join("");
     }
 
-    const contextText = data.context_text || (isBlocked ? "// [Zero-Helpfulness Active] Vector context withheld by pre-retrieval security policy." : "// No authorized context available for Stage 3 LLM synthesis.");
+    const contextText = data.context_text || ((isBlocked && !isStage3Blocked) ? "// [Zero-Helpfulness Active] Vector context withheld by pre-retrieval security policy." : "// Context evaluated under Stage 3 XML encapsulation.");
     const auditJsonStr = JSON.stringify(data.audit_event || { event_type: "RETRIEVAL_DECISION", query: turnObj.query, decision: secDefense.decision || "ZERO_AUTHORIZED_RESULTS_TERMINATION" }, null, 2);
     const authFilterStr = JSON.stringify(data.auth_filter || secDefense.auth_filter || {}, null, 2);
 
     // Header Status Badge & Action Button
-    const statusBadgeHtml = isBlocked 
-      ? `<span class="badge-defense-interception">${escapeHtml(secDefense.badge_label || "🛡️ SECURITY BLOCKED")}</span>`
-      : `<span class="badge-defense-pass">APPROVED &amp; VERIFIED</span>`;
+    let statusBadgeHtml = "";
+    if (isStage3Blocked) {
+      statusBadgeHtml = `<span class="badge-defense-interception" style="background:rgba(239,68,68,0.15);border-color:rgba(239,68,68,0.4);color:#fca5a5;">🛑 STAGE 3 GUARDRAIL INTERCEPTED</span>`;
+    } else if (isBlocked) {
+      statusBadgeHtml = `<span class="badge-defense-interception">${escapeHtml(secDefense.badge_label || "🛡️ SECURITY BLOCKED")}</span>`;
+    } else {
+      statusBadgeHtml = `<span class="badge-defense-pass">APPROVED &amp; VERIFIED</span>`;
+    }
 
-    const buttonLabel = isBlocked ? "Inspect Security Defense" : "Inspect RAG Chunks";
-    const drawerTitle = isBlocked ? "DEVELOPER INSPECTION MODE — ACTIVE DEFENSE INTERCEPTION" : "DEVELOPER INSPECTION MODE";
-    const drawerDesc = isBlocked 
-      ? "Stage 1/2 pre-retrieval scope enforcement, zero-helpfulness containment, and cryptographic audit trail."
-      : "Stage 2 vector candidates, cross-encoder rerank scores, XML context, and JSON audit log.";
+    const buttonLabel = isStage3Blocked 
+      ? "Inspect Stage 3 Interception" 
+      : (isBlocked ? "Inspect Security Defense" : "Inspect RAG Chunks");
+    const drawerTitle = isStage3Blocked 
+      ? "DEVELOPER INSPECTION MODE — STAGE 3 OUTPUT GUARDRAIL INTERCEPTION" 
+      : (isBlocked ? "DEVELOPER INSPECTION MODE — ACTIVE DEFENSE INTERCEPTION" : "DEVELOPER INSPECTION MODE");
+    const drawerDesc = isStage3Blocked 
+      ? "Stage 1 & 2 succeeded (authorized chunks retrieved). Stage 3 output security inspection caught indirect injection / exfiltration and neutralized generation."
+      : (isBlocked 
+        ? "Stage 1/2 pre-retrieval scope enforcement, zero-helpfulness containment, and cryptographic audit trail."
+        : "Stage 2 vector candidates, cross-encoder rerank scores, XML context, and JSON audit log.");
 
     // Active Defense Diagnostics section for blocked queries
     let defenseSectionHtml = "";
@@ -530,6 +566,20 @@ document.addEventListener("DOMContentLoaded", () => {
       const threatText = secDefense.threat_signatures && secDefense.threat_signatures.length > 0 
         ? `<div class="defense-meta-row"><span class="defense-meta-label">Threat Signature:</span><span class="defense-meta-value code" style="border-color:#71717a;">${escapeHtml(secDefense.threat_signatures.join(", "))}</span></div>` 
         : "";
+
+      const calloutHtml = isStage3Blocked 
+        ? `
+            <div class="defense-zero-callout" style="border-left-color:#ef4444;">
+              <strong>Stage 3 Output Guardrail Architecture:</strong>
+              Stage 1 (Ingestion) and Stage 2 (Authorized Retrieval) successfully retrieved authorized corporate evidence. However, Stage 3 Output Inspection scanned the LLM-generated response, intercepted indirect prompt injection instructions / unauthorized data disclosure, and neutralized the output.
+            </div>
+          `
+        : `
+            <div class="defense-zero-callout">
+              <strong>Why 0 Chunks Are Released (Zero-Helpfulness Guarantee):</strong>
+              When queries fail authorization checks or match untrusted patterns, SecureRAG intentionally releases 0 chunks. The pipeline terminates retrieval immediately and strictly forbids falling back to broader indexes or adjacent tenants to eliminate side-channel data leakage.
+            </div>
+          `;
 
       defenseSectionHtml = `
         <div class="dev-section-mono">
@@ -550,10 +600,7 @@ document.addEventListener("DOMContentLoaded", () => {
               <span class="defense-meta-label">Policy Rationale:</span>
               <span class="defense-meta-value">${escapeHtml(rationaleText)}</span>
             </div>
-            <div class="defense-zero-callout">
-              <strong>Why 0 Chunks Are Released (Zero-Helpfulness Guarantee):</strong>
-              When queries fail authorization checks or match untrusted patterns, SecureRAG intentionally releases 0 chunks. The pipeline terminates retrieval immediately and strictly forbids falling back to broader indexes or adjacent tenants to eliminate side-channel data leakage.
-            </div>
+            ${calloutHtml}
           </div>
         </div>
 
@@ -562,6 +609,23 @@ document.addEventListener("DOMContentLoaded", () => {
             <h5>Pre-Retrieval Scope Filter (ChromaDB Authorization Filter)</h5>
           </div>
           <pre class="code-block-mono">${escapeHtml(authFilterStr)}</pre>
+        </div>
+      `;
+    }
+
+    // Violations Callout Box for Stage 3 Blocks
+    let violationsBoxHtml = "";
+    const violations = (data.security_report && data.security_report.violations) || 
+                       (data.generation && data.generation.security_report && data.generation.security_report.violations) || [];
+    if (isStage3Blocked && violations.length > 0) {
+      violationsBoxHtml = `
+        <div class="stage3-violations-box" style="margin-top:14px;padding:12px 14px;background:rgba(239,68,68,0.08);border:1px solid rgba(239,68,68,0.3);border-radius:6px;">
+          <div style="font-weight:600;font-size:13px;color:#fca5a5;margin-bottom:8px;display:flex;align-items:center;gap:6px;">
+            <span>🛡️</span> Stage 3 Output Violations Intercepted &amp; Neutralized:
+          </div>
+          <ul style="margin:0;padding-left:20px;font-size:12px;color:#e2e8f0;line-height:1.7;">
+            ${violations.map(v => `<li>${escapeHtml(v)}</li>`).join("")}
+          </ul>
         </div>
       `;
     }
@@ -584,11 +648,12 @@ document.addEventListener("DOMContentLoaded", () => {
 
           <div class="ai-answer-box-mono">
             <p class="ai-answer-text-mono">${escapeHtml(cleanAnswer) || "// No response generated."}</p>
+            ${violationsBoxHtml}
           </div>
 
           <div class="ai-card-footer-mono">
             <div class="footer-block-mono">
-              <span class="footer-label-mono">${isBlocked ? "DEFENSE ENFORCEMENT CITATIONS" : "VALIDATED SOURCE CITATIONS"}</span>
+              <span class="footer-label-mono">${isBlocked ? (isStage3Blocked ? "INSPECTED SOURCE EVIDENCE" : "DEFENSE ENFORCEMENT CITATIONS") : "VALIDATED SOURCE CITATIONS"}</span>
               <div class="citations-flex-mono">${citationsHtml}</div>
             </div>
           </div>
@@ -632,7 +697,9 @@ document.addEventListener("DOMContentLoaded", () => {
         if (drawer) {
           drawer.classList.toggle("hidden");
           const isHidden = drawer.classList.contains("hidden");
-          if (isBlocked) {
+          if (isStage3Blocked) {
+            btnToggle.textContent = isHidden ? "Inspect Stage 3 Interception" : "Hide Stage 3 Inspection";
+          } else if (isBlocked) {
             btnToggle.textContent = isHidden ? "Inspect Security Defense" : "Hide Security Defense";
           } else {
             btnToggle.textContent = isHidden ? "Inspect RAG Chunks" : "Hide RAG Inspection";

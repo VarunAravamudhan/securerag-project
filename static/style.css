@@ -1287,7 +1287,7 @@ body.theme-black {
    ENTERPRISE SECURITY PIPELINE & LIVE SECURITY TRACE CONSOLE
    ============================================================================ */
 
-/* Assistant Split Container (Desktop Two-Column Workspace) */
+/* Assistant Split Container (Desktop Two-Column or Single-Panel Workspace) */
 .assistant-split-container {
   display: flex;
   flex-direction: row;
@@ -1295,6 +1295,17 @@ body.theme-black {
   width: 100%;
   min-height: calc(100vh - 100px);
   align-items: flex-start;
+}
+
+.assistant-split-container.single-panel {
+  flex-direction: column;
+  gap: 0;
+}
+
+.assistant-split-container.single-panel .assistant-chat-column {
+  flex: 1 1 100%;
+  width: 100%;
+  max-width: 100%;
 }
 
 .assistant-chat-column {
@@ -1859,7 +1870,11 @@ body.theme-black {
     flex-direction: column;
     height: auto;
   }
+  .assistant-chat-column {
+    order: 1;
+  }
   .assistant-pipeline-column {
+    order: 2;
     width: 100%;
     max-width: 100%;
     flex: none;

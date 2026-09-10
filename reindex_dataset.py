@@ -99,6 +99,7 @@ def reindex_all():
         ("company_a/it_security_policy.pdf", "company_a", ["it_admin", "security_officer", "admin"], "confidential", "security_lead@company_a.corp"),
         ("company_a/reimbursement_policy.pdf", "company_a", ["employee", "manager", "admin"], "internal", "finance@company_a.corp"),
         ("company_a/work_from_home_policy.pdf", "company_a", ["employee", "manager", "admin"], "internal", "hr_admin@company_a.corp"),
+        ("company_a/SecureRAG_Stage3_Indirect_Prompt_Injection_Test.pdf", "company_a", ["employee", "manager", "admin"], "internal", "secops@company_a.corp"),
 
         # Company B (Tenant: company_b)
         ("company_b/benefits_policy.pdf", "company_b", ["employee", "manager", "admin"], "internal", "hr@company_b.corp"),
