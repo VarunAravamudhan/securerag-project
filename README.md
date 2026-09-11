@@ -1,3 +1,5 @@
+# MEGATHON 2026
+# Cybersecurity PS:3
 # 🛡️ SecureRAG
 
 ### A Security-First Retrieval-Augmented Generation (RAG) Framework
